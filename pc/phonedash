@@ -3,6 +3,7 @@
 
   phonedash run                 service loop: heartbeat + config + theme every 30 s (lock state every 3 s), photos every 10 min
   phonedash pair                read the API token from the phone over USB (adb)
+  phonedash pair-launcher       give sidecar_launcher (another phone, USB) the PC address + token for photos/colours
   phonedash brightness 30|auto  brightness override (until the next schedule slot)
   phonedash screen on|off|auto  screen override (until the next schedule change)
   phonedash status
@@ -318,6 +319,101 @@ def sync_photos(c, verbose=False):
         print(f"\nPhotos: {len(wanted)} on the PC, {len(missing)} sent, {len(remote - wanted.keys())} removed.")
 
 
+# ---- Pull server for other phones (sidecar_launcher): photos + palette ------------------------------
+LAUNCHER_PKG = "dev.vq.sidecarlauncher"
+LAUNCHER_TOKEN = CONF_DIR / "launcher_token"
+PULL_PORT = 8766
+PULL_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "phone-dash" / "pull"
+
+
+def launcher_token():
+    if not LAUNCHER_TOKEN.exists():
+        CONF_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCHER_TOKEN.write_text(os.urandom(24).hex() + "\n")
+        LAUNCHER_TOKEN.chmod(0o600)
+    return LAUNCHER_TOKEN.read_text().strip()
+
+
+def serve_pull():
+    """GET /photos, GET /photos/<name>?max=N (resized JPEG, cached), GET /colors — bearer token."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse, parse_qs
+    tok = launcher_token()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, body, ctype="application/json"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.headers.get("Authorization") != f"Bearer {tok}":
+                return self.send(401, b'{"error":"unauthorized"}')
+            u = urlparse(self.path)
+            c = conf()
+            if u.path == "/colors":
+                try:
+                    return self.send(200, json.dumps({"colors": {"dark": json.loads(COLORS.read_text())["colors"]["dark"]}}).encode())
+                except (OSError, KeyError, ValueError):
+                    return self.send(404, b"{}")
+            if u.path == "/photos":
+                return self.send(200, json.dumps({"photos": sorted(local_photos(c))}).encode())
+            if u.path.startswith("/photos/"):
+                name = u.path.rsplit("/", 1)[-1]
+                src = local_photos(c).get(name)
+                if not src:
+                    return self.send(404, b"{}")
+                size = max(320, min(4000, int(parse_qs(u.query).get("max", ["1440"])[0])))
+                cached = PULL_CACHE / f"{size}-{name}"
+                if not cached.exists():
+                    PULL_CACHE.mkdir(parents=True, exist_ok=True)
+                    cached.write_bytes(encode_photo(src, size))
+                return self.send(200, cached.read_bytes(), "image/jpeg")
+            self.send(404, b"{}")
+
+    ThreadingHTTPServer(("0.0.0.0", PULL_PORT), H).serve_forever()
+
+
+def pair_launcher():
+    """Writes {host, port, token} into the launcher's files dir over adb (any connected phone that has it)."""
+    host = os.uname().nodename
+    try:
+        st = json.loads(subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True).stdout)
+        host = ",".join([st["Self"]["DNSName"].rstrip(".")] + st["Self"].get("TailscaleIPs", [])[:1]) or host
+    except Exception:
+        pass
+    hosts = host.split(",")
+    try:  # LAN addresses as fallbacks (phone at home without Tailscale)
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"], capture_output=True, text=True).stdout
+        hosts += [l.split()[3].split("/")[0] for l in out.splitlines() if "tailscale" not in l]
+    except OSError:
+        pass
+    host = ",".join(dict.fromkeys(hosts))
+    b = conf().get("billable", {})
+    data = json.dumps({"host": host, "port": PULL_PORT, "token": launcher_token(),
+                       "billable_url": b.get("url", ""), "billable_token": b.get("token", "")})
+    serials = [l.split()[0] for l in subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout.splitlines()[1:] if l.endswith("device")]
+    done = 0
+    for sn in serials:
+        if LAUNCHER_PKG not in subprocess.run(["adb", "-s", sn, "shell", "pm", "list", "packages", LAUNCHER_PKG], capture_output=True, text=True).stdout:
+            continue
+        # Passed as an intent extra (the app can't read files adb creates in its dir); the app only
+        # accepts it from the shell uid.
+        import base64
+        b64 = base64.b64encode(data.encode()).decode()
+        subprocess.run(["adb", "-s", sn, "shell", "am", "start", "-n", f"{LAUNCHER_PKG}/.MainActivity", "--es", "pc_pair_b64", b64],
+                       capture_output=True, check=True)
+        print(f"{sn}: launcher paired with {host}:{PULL_PORT}")
+        done += 1
+    if not done:
+        sys.exit("No connected phone has the launcher installed.")
+
+
 def run():
     def goodbye(signum, frame):
         # Service stopped or PC shutting down: tell the phone right away (photo frame without the 90 s wait).
@@ -327,6 +423,7 @@ def run():
             pass
         sys.exit(0)
 
+    threading.Thread(target=lambda: _safe(serve_pull), daemon=True).start()
     signal.signal(signal.SIGTERM, goodbye)
     signal.signal(signal.SIGINT, goodbye)
     photo_thread, last_photo = None, 0.0
@@ -380,6 +477,7 @@ def main(argv):
     cmd, args = argv[0], argv[1:]
     if cmd == "run": return run()
     if cmd == "pair": return pair()
+    if cmd == "pair-launcher": return pair_launcher()
     c = conf()
     if cmd == "brightness" and args:
         v = None if args[0] == "auto" else int(args[0])

@@ -99,6 +99,11 @@ A single Python 3 script (standard library + Pillow for photos):
 * Every 10 minutes a background thread **syncs photos**: images from the configured folders
   are resized (long side `max_size`), named by a hash of path + mtime + size and uploaded; photos
   that no longer exist on the PC are deleted from the phone.
+* A small **pull server** (port 8766, bearer token) serves the slideshow photos, resized on
+  demand and cached, and the matugen palette to [sidecar_launcher](https://github.com/ciabattarichri/sidecar_launcher),
+  the companion phone launcher, which downloads them on Wi-Fi while it is on screen.
+  `phonedash pair-launcher` hands it the PC addresses (Tailscale name and IP, LAN IPs) and the token;
+  the phone asks for confirmation before accepting.
 * The other sub-commands are thin wrappers used by you or by the plugin (brightness, screen,
   schedule, notes, layout, options, …); they edit `config.toml` and push it at once.
 

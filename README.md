@@ -25,6 +25,8 @@ Built for a Samsung Galaxy A53 5G on stock One UI (debloated) and a Fedora PC wi
   near-zero CPU when idle.
 * **Controlled from the PC** — `phonedash` CLI and a DMS bar plugin (brightness, screen,
   slideshow, post-its, options, IT/EN language).
+* **Companion launcher** — [sidecar_launcher](https://github.com/ciabattarichri/sidecar_launcher), a
+  portrait phone launcher in the same style that pulls photos and colours from `phonedash`.
 * **3D-printable stand** — parametric FreeCAD macros for the phone model and a desk stand.
 
 ## Repository layout
