@@ -5,6 +5,10 @@ the desktop: it follows the PC's [DankMaterialShell](https://github.com/AvengeMe
 theme, shows the PC's notifications, knows when the PC is locked or off, and is controlled from
 the DMS bar.
 
+![desk_sidecar on the desk](docs/img/desk.jpg)
+
+![The dashboard: clock, hours card, player, weather tab](docs/img/dashboard.jpg)
+
 Built for a Samsung Galaxy A53 5G on stock One UI (debloated) and a Fedora PC with niri + DMS.
 
 ## Features
