@@ -1,0 +1,136 @@
+# -*- coding: utf-8 -*-
+"""
+Galaxy A53 desk_sidecar stand — parametric FreeCAD macro (Part workbench).
+
+Phone in landscape, USB-C on the RIGHT. It slides in from the open top and is held by thin
+front lips on left/right/bottom (they cover only the black bezel). Right side open for the
+USB-C plug + speaker, top open for the side buttons, vented back with a cable pass,
+reclined by TILT degrees on two ribs + a base plate.
+
+Run: Macro > Macros… > Execute (or FreeCADCmd this file). Edit the parameters below.
+All sizes in mm. MEASURE YOUR PHONE: the defaults are Samsung's nominal A53 dimensions.
+"""
+import math
+import os
+
+import FreeCAD as App
+import Part
+
+# ---- Phone -------------------------------------------------------------------------------
+PHONE_L = 159.6      # long side (landscape width)
+PHONE_H = 74.8       # short side (landscape height)
+PHONE_T = 8.1        # thickness (body, without camera bump)
+CAM_BUMP = 1.6       # rear camera bump height (a window in the back clears it)
+CLEAR = 0.5          # slip-fit clearance per side
+
+# ---- Frame -------------------------------------------------------------------------------
+WALL = 2.6           # side / bottom walls
+FRONT = 1.8          # front lip thickness
+LIP = 2.4            # how far the front lip overlaps the phone (stay inside the bezel!)
+BACK = 2.2           # back plate thickness
+TILT = 18.0          # recline from vertical, degrees
+
+# ---- Openings ----------------------------------------------------------------------------
+PORT_SPAN = 38.0     # right side opening length (USB-C + speaker), centred on the short side
+VENT_W = 4.0         # back vent slot width
+VENT_GAP = 5.0       # web between vents
+VENT_MARGIN = 14.0   # keep vents away from the frame edges
+CABLE_W, CABLE_H = 16.0, 12.0   # cable pass in the back plate, near the USB end
+CAM_WIN = (34.0, 30.0)          # rear camera window (x, z) from the top-left corner seen from the FRONT
+CAM_POS = (8.0, 6.0)            # its offset from the phone's top-left corner (seen from the front)
+
+# ---- Stand -------------------------------------------------------------------------------
+BASE_T = 4.0
+BASE_EXTRA = 12.0    # base overhang beyond the ribs
+RIB_T = 5.0
+RIB_HEIGHT = 0.65    # rib reaches this fraction of the frame height
+FRONT_LEDGE = 6.0    # little ledge in front of the frame
+
+# Output next to this macro (falls back to the current directory when __file__ is unknown)
+OUT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+
+# ------------------------------------------------------------------------------------------
+V = App.Vector
+pl = PHONE_L + 2 * CLEAR
+ph = PHONE_H + 2 * CLEAR
+pt = PHONE_T + 2 * CLEAR
+L = pl + 2 * WALL                 # outer length (X)
+D = FRONT + pt + BACK             # depth (Y), screen faces -Y
+H = ph + WALL                     # height (Z), top is open
+z0 = BASE_T
+
+
+def box(x, y, z, dx, dy, dz):
+    return Part.makeBox(dx, dy, dz, V(x, y, z))
+
+
+# Frame (upright), front face at y = 0
+frame = box(0, 0, z0, L, D, H)
+# phone pocket, open at the top
+frame = frame.cut(box(WALL, FRONT, z0 + WALL, pl, pt, H))
+# screen window: lips on left / right / bottom only, open to the top
+frame = frame.cut(box(WALL + LIP, -1, z0 + WALL + LIP, pl - 2 * LIP, FRONT + 2, H))
+# right side opening for USB-C plug + speaker
+frame = frame.cut(box(WALL + pl - 1, FRONT, z0 + WALL + ph / 2 - PORT_SPAN / 2, WALL + 2, pt, PORT_SPAN))
+# back vents (vertical slots)
+yb = FRONT + pt - 1
+vz0, vz1 = z0 + WALL + VENT_MARGIN, z0 + H - VENT_MARGIN
+x = WALL + VENT_MARGIN + CAM_WIN[0]
+while x + VENT_W < L - WALL - VENT_MARGIN - CABLE_W - 6:
+    frame = frame.cut(box(x, yb, vz0, VENT_W, BACK + 2, vz1 - vz0))
+    x += VENT_W + VENT_GAP
+# cable pass near the USB end
+frame = frame.cut(box(L - WALL - VENT_MARGIN - CABLE_W, yb, z0 + WALL + ph / 2 - CABLE_H / 2, CABLE_W, BACK + 2, CABLE_H))
+# rear camera window (seen from the front the camera sits top-left when USB is on the right)
+cx = WALL + CAM_POS[0]
+cz = z0 + WALL + ph - CAM_POS[1] - CAM_WIN[1]
+frame = frame.cut(box(cx, yb, cz, CAM_WIN[0], BACK + 2, CAM_WIN[1]))
+
+# Recline: rotate about the bottom-back edge so the frame leans back (+Y)
+pivot = V(0, D, z0)
+frame.rotate(pivot, V(1, 0, 0), -TILT)
+
+t = math.radians(TILT)
+top_back = V(0, D + H * math.sin(t), z0 + H * math.cos(t))
+rib_top = V(0, D + RIB_HEIGHT * H * math.sin(t), z0 + RIB_HEIGHT * H * math.cos(t))
+base_depth = rib_top.y + BASE_EXTRA
+
+
+def rib(xpos):
+    pts = [V(xpos, D - 2, z0), V(xpos, rib_top.y, rib_top.z), V(xpos, rib_top.y + 2, z0), V(xpos, D - 2, z0)]
+    face = Part.Face(Part.makePolygon(pts))
+    return face.extrude(V(RIB_T, 0, 0))
+
+
+front_y = -D * math.sin(0) - FRONT_LEDGE   # ledge sits in front of the frame bottom
+base = box(0, front_y, 0, L, base_depth - front_y, BASE_T)
+# small ledge in front, so the reclined frame can't slide forward
+lift = D * math.sin(t) + 1
+ledge = box(0, front_y, BASE_T, L, FRONT_LEDGE + 1.5, max(lift, 3.0))
+ribs = rib(WALL + 18).fuse(rib(L - WALL - 18 - RIB_T))
+
+stand = base.fuse([frame, ledge, ribs]).removeSplitter()
+
+doc = App.newDocument("A53Stand")
+obj = doc.addObject("Part::Feature", "A53DeskStand")
+obj.Shape = stand
+doc.recompute()
+
+os.makedirs(OUT_DIR, exist_ok=True)
+doc.saveAs(os.path.join(OUT_DIR, "a53_desk_stand.FCStd"))
+Part.export([obj], os.path.join(OUT_DIR, "a53_desk_stand.step"))
+import Mesh  # noqa: E402
+
+mesh = Mesh.Mesh(stand.tessellate(0.2))
+mesh.write(os.path.join(OUT_DIR, "a53_desk_stand.stl"))
+bb = stand.BoundBox
+print("A53 stand: %.1f x %.1f x %.1f mm, volume %.1f cm3, valid=%s"
+      % (bb.XLength, bb.YLength, bb.ZLength, stand.Volume / 1000, stand.isValid()))
+
+try:
+    import FreeCADGui as Gui
+    if Gui.getMainWindow():
+        Gui.SendMsgToActiveView("ViewFit")
+        Gui.activeDocument().activeView().viewIsometric()
+except Exception:
+    pass

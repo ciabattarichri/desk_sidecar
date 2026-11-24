@@ -1,0 +1,78 @@
+# Facebook
+com.facebook.katana
+com.facebook.appmanager
+com.facebook.services
+com.facebook.system
+# Microsoft
+com.microsoft.appmanager
+com.microsoft.skydrive
+com.samsung.android.mdx
+com.samsung.android.mdx.kit
+# Bixby
+com.samsung.android.bixby.agent
+com.samsung.android.bixby.wakeup
+com.samsung.android.app.settings.bixby
+com.samsung.android.bixbyvision.framework
+com.samsung.android.visionintelligence
+com.samsung.android.intellivoiceservice
+com.samsung.android.svoiceime
+# Auto-installer / promo
+com.aura.oobe.samsung.gl
+android.autoinstalls.config.samsung
+com.samsung.android.app.spage
+com.samsung.android.app.tips
+com.sec.android.widgetapp.webmanual
+# AR / sticker / emoji
+com.samsung.android.ardrawing
+com.samsung.android.aremoji
+com.samsung.android.aremojieditor
+com.samsung.android.arzone
+com.samsung.android.app.camera.sticker.facearavatar.preload
+com.sec.android.mimage.avatarstickers
+com.samsung.android.stickercenter
+com.sec.android.autodoodle.service
+com.google.ar.core
+# Samsung varie
+com.samsung.android.game.gamehome
+com.samsung.android.game.gametools
+com.samsung.android.kidsinstaller
+com.samsung.android.app.parentalcare
+com.samsung.android.app.dressroom
+com.samsung.android.samsungpass
+com.samsung.android.samsungpassautofill
+com.samsung.android.spayfw
+com.sec.android.easyMover
+com.sec.android.easyMover.Agent
+com.samsung.android.smartswitchassistant
+com.samsung.android.fmm
+com.samsung.android.scloud
+com.samsung.android.app.sharelive
+com.samsung.android.mapsagent
+com.samsung.android.app.watchmanagerstub
+com.samsung.android.app.reminder
+com.samsung.android.service.stplatform
+com.samsung.android.widget.pictureframe
+com.samsung.android.smartsuggestions
+com.samsung.android.rubin.app
+com.samsung.storyservice
+com.samsung.android.app.dofviewer
+com.samsung.android.app.earphonetypec
+com.samsung.android.forest
+com.samsung.android.privacydashboard
+com.samsung.android.da.daagent
+com.samsung.android.dbsc
+# Telemetria
+com.samsung.android.knox.analytics.uploader
+com.sec.android.diagmonagent
+com.samsung.android.dqagent
+com.samsung.sait.sohservice
+com.samsung.android.ipsgeofence
+com.samsung.android.beaconmanager
+com.hiya.star
+# Google superflue
+com.google.android.videos
+com.google.android.apps.youtube.music
+com.google.android.apps.photos
+com.google.android.apps.docs
+com.google.android.projection.gearhead
+com.google.audio.hearing.visualization.accessibility.scribe

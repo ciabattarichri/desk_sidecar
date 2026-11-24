@@ -1,0 +1,476 @@
+#!/usr/bin/python3
+"""phonedash — control the desk_sidecar phone dashboard from the PC.
+
+  phonedash run                 service loop: heartbeat + config + theme every 30 s (lock state every 3 s), photos every 10 min
+  phonedash pair                read the API token from the phone over USB (adb)
+  phonedash brightness 30|auto  brightness override (until the next schedule slot)
+  phonedash screen on|off|auto  screen override (until the next schedule change)
+  phonedash status
+  phonedash sync-photos
+  phonedash google-token TOKEN  link Google Home with an oauth_token taken from a browser
+  phonedash schedule            print the schedule as JSON
+  phonedash set-schedule JSON   save the schedule (used by the DMS plugin)
+  phonedash animation [off|30s|always]  get/set the player wave/cover animation
+  phonedash notes / set-notes JSON      post-it notes (list of strings)
+  phonedash option NAME [VALUE]         lyrics on|off, light on|off, on_lock frame|off|none, slideshow SECONDS, language it|en
+  phonedash layout / set-layout JSON    {"tabs":[...], "show_billable":bool, "show_notes":bool}
+Config: ~/.config/phone-dash/config.toml
+"""
+import hashlib, io, json, os, re, signal, subprocess, sys, threading, time, tomllib, urllib.error, urllib.request
+from pathlib import Path
+
+CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "phone-dash"
+CONF, TOKEN = CONF_DIR / "config.toml", CONF_DIR / "token"
+COLORS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "dms" / "dms-colors.json"
+PKG = "dev.vq.dashboard"
+IMG_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+
+DEFAULT_CONF = """\
+# Phone: Tailscale (MagicDNS) name or IP address
+phone = "galaxy-a53-5g"
+port = 8765
+language = "it"           # dashboard UI: "it" or "en"
+
+# Brightness % per time slot: each value holds until the next one
+[brightness]
+"07:00" = 15
+"08:30" = 45
+"19:30" = 20
+"23:00" = 1
+
+[screen]
+night = ["23:00-07:00"]   # dimmed clock only
+off = []                  # black screen (tap = on for 30 s), e.g. ["01:00-06:30"]
+pc_offline_after = 90     # seconds without heartbeat => PC considered off => photo frame
+on_lock = "frame"         # PC locked: "frame" (photo frame), "off" (black screen), "none"
+light_sensor = true       # scale brightness with the phone's light sensor
+
+[slideshow]
+folders = ["~/Pictures/my_wallpapers"]
+seconds = 20
+max_size = 2400           # long side (px) of the photos sent to the phone
+
+# Billable Hours: Google Sheets backup web app (same URL and secret word as the watchapp)
+[billable]
+url = ""
+token = ""
+
+[player]
+animation = "30s"         # wave and cover: "off", "30s" (after track change/touch), "always"
+lyrics = true             # synced lyrics (LRCLIB) in the photo frame
+
+[notes]
+items = []                # post-it notes shown on the dashboard
+
+[layout]
+tabs = ["notifications", "agenda", "home", "photos", "weather", "pc"]   # order; remove an entry to hide that tab
+show_billable = true
+show_notes = true
+"""
+
+
+def conf():
+    if not CONF.exists():
+        CONF_DIR.mkdir(parents=True, exist_ok=True)
+        CONF.write_text(DEFAULT_CONF)
+    with CONF.open("rb") as f:
+        return tomllib.load(f)
+
+
+ANIM_MODES = ("off", "30s", "always")
+ALL_TABS = ["notifications", "agenda", "home", "photos", "weather", "pc"]
+HM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def write_conf(c):
+    """Rewrites config.toml from the parsed dict (same layout as DEFAULT_CONF)."""
+    q = json.dumps
+    s, sl = c.get("screen", {}), c.get("slideshow", {})
+    lines = [
+        "# Phone: Tailscale (MagicDNS) name or IP address",
+        f"phone = {q(c.get('phone', 'galaxy-a53-5g'))}",
+        f"port = {int(c.get('port', 8765))}",
+        f"language = {q(c.get('language', 'it'))}   # dashboard UI: \"it\" or \"en\"",
+        "",
+        "# Brightness % per time slot: each value holds until the next one",
+        "[brightness]",
+        *[f"{q(k)} = {int(v)}" for k, v in sorted(c.get("brightness", {}).items())],
+        "",
+        "[screen]",
+        f"night = {q(s.get('night', []))}   # dimmed clock only",
+        f"off = {q(s.get('off', []))}   # black screen (tap = on for 30 s)",
+        f"pc_offline_after = {int(s.get('pc_offline_after', 90))}     # seconds without heartbeat => PC considered off",
+        f"on_lock = {q(s.get('on_lock', 'frame'))}         # PC locked: \"frame\", \"off\", \"none\"",
+        f"light_sensor = {'true' if s.get('light_sensor', True) else 'false'}       # scale brightness with the light sensor",
+        "",
+        "[slideshow]",
+        f"folders = {q(sl.get('folders', ['~/Pictures/my_wallpapers']))}",
+        f"seconds = {int(sl.get('seconds', 20))}",
+        f"max_size = {int(sl.get('max_size', 2400))}           # long side (px) of the photos sent to the phone",
+        "",
+        "# Billable Hours: Google Sheets backup web app (same URL and secret word as the watchapp)",
+        "[billable]",
+        f"url = {q(c.get('billable', {}).get('url', ''))}",
+        f"token = {q(c.get('billable', {}).get('token', ''))}",
+        "",
+        "[player]",
+        f"animation = {q(c.get('player', {}).get('animation', '30s'))}         # wave and cover: \"off\", \"30s\", \"always\"",
+        f"lyrics = {'true' if c.get('player', {}).get('lyrics', True) else 'false'}             # synced lyrics in the photo frame",
+        "",
+        "[notes]",
+        f"items = {q(c.get('notes', {}).get('items', []))}",
+        "",
+        "[layout]",
+        f"tabs = {q(c.get('layout', {}).get('tabs', ALL_TABS))}   # order; remove an entry to hide that tab",
+        f"show_billable = {'true' if c.get('layout', {}).get('show_billable', True) else 'false'}",
+        f"show_notes = {'true' if c.get('layout', {}).get('show_notes', True) else 'false'}",
+        "",
+    ]
+    tmp = CONF.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines))
+    tmp.replace(CONF)
+
+
+def set_schedule(c, raw):
+    d = json.loads(raw)
+    bright = {}
+    for t, v in d.get("brightness", []):
+        if not HM.match(t) or not 0 <= int(v) <= 100:
+            sys.exit(f"Invalid brightness slot: {t} = {v}")
+        bright[t] = int(v)
+    if not bright:
+        sys.exit("At least one brightness slot is required")
+    ranges = {}
+    for key in ("night", "off"):
+        out = []
+        for r in d.get(key, []):
+            a, _, b = r.partition("-")
+            if not (HM.match(a) and HM.match(b)):
+                sys.exit(f"Invalid range: {r}")
+            out.append(f"{a}-{b}")
+        ranges[key] = out
+    c["brightness"] = bright
+    c.setdefault("screen", {}).update(ranges)
+    write_conf(c)
+    try:  # push right away instead of waiting for the service tick
+        req(c, "POST", "/state", state_payload(c))
+    except Exception:
+        pass
+    print("ok")
+
+
+def push(c):
+    try:
+        req(c, "POST", "/state", state_payload(c))
+    except Exception:
+        pass
+
+
+def token():
+    if not TOKEN.exists():
+        sys.exit("No token: connect the phone over USB and run `phonedash pair`.")
+    return TOKEN.read_text().strip()
+
+
+def req(c, method, path, body=None, ctype="application/json", timeout=10):
+    url = f"http://{c.get('phone', 'a53')}:{c.get('port', 8765)}{path}"
+    data = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
+    r = urllib.request.Request(url, data=data, method=method,
+                               headers={"Authorization": f"Bearer {token()}", "Content-Type": ctype})
+    with urllib.request.urlopen(r, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def state_payload(c):
+    s, sl = c.get("screen", {}), c.get("slideshow", {})
+    payload = {"config": {
+        "brightness": [[k, int(v)] for k, v in c.get("brightness", {}).items()],
+        "night": s.get("night", []),
+        "screen_off": s.get("off", []),
+        "pc_offline_after": int(s.get("pc_offline_after", 90)),
+        "slideshow_seconds": int(sl.get("seconds", 20)),
+        "billable_url": c.get("billable", {}).get("url", ""),
+        "billable_token": c.get("billable", {}).get("token", ""),
+        "player_animation": c.get("player", {}).get("animation", "30s"),
+        "lyrics": bool(c.get("player", {}).get("lyrics", True)),
+        "light_sensor": bool(s.get("light_sensor", True)),
+        "on_lock": s.get("on_lock", "frame"),
+        "language": c.get("language", "it"),
+        "tabs": c.get("layout", {}).get("tabs", list(ALL_TABS)),
+        "show_billable": bool(c.get("layout", {}).get("show_billable", True)),
+        "show_notes": bool(c.get("layout", {}).get("show_notes", True)),
+    }}
+    payload["notifications"] = recent_notifications()
+    payload["notes"] = [str(n)[:200] for n in c.get("notes", {}).get("items", [])][:6]
+    payload["pc_locked"] = pc_locked()
+    payload["pc_stats"] = pc_stats()
+    try:
+        payload["colors"] = json.loads(COLORS.read_text())["colors"]["dark"]
+    except (OSError, KeyError, ValueError):
+        pass
+    return payload
+
+
+NOTIF = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "dms" / "notification_history.json"
+TAG = re.compile(r"<[^>]+>")
+
+
+def recent_notifications(limit=20, max_age_h=24):
+    """Last DMS notifications (newest first), plain text, trimmed."""
+    try:
+        items = json.loads(NOTIF.read_text()).get("notifications", [])
+    except (OSError, ValueError):
+        return []
+    cutoff = (time.time() - max_age_h * 3600) * 1000
+    out = []
+    for n in items:
+        ts = int(n.get("timestamp", 0))
+        if ts < cutoff:
+            continue
+        out.append({"app": n.get("appName", "")[:40], "summary": TAG.sub("", n.get("summary", ""))[:120],
+                    "body": TAG.sub("", n.get("body", ""))[:300], "ts": ts})
+    out.sort(key=lambda n: -n["ts"])
+    return out[:limit]
+
+
+def pc_locked():
+    """DMS lock screen state (falls back to logind's LockedHint)."""
+    try:
+        out = subprocess.run(["dms", "ipc", "call", "lock", "isLocked"], capture_output=True, text=True, timeout=3)
+        if out.returncode == 0 and out.stdout.strip() in ("true", "false"):
+            return out.stdout.strip() == "true"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    sid = os.environ.get("XDG_SESSION_ID", "")
+    if sid:
+        out = subprocess.run(["loginctl", "show-session", sid, "-p", "LockedHint", "--value"], capture_output=True, text=True)
+        return out.stdout.strip() == "yes"
+    return False
+
+
+_cpu_prev = None
+
+
+def _hwmon_temp(name):
+    for h in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            if (h / "name").read_text().strip() == name:
+                return round(int((h / "temp1_input").read_text()) / 1000)
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def pc_stats():
+    """CPU % since the previous call, RAM, temperatures. Cheap: a few /proc and /sys reads."""
+    global _cpu_prev
+    vals = [int(v) for v in Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]]
+    idle, total = vals[3] + vals[4], sum(vals)
+    cpu = None
+    if _cpu_prev:
+        dt, di = total - _cpu_prev[1], idle - _cpu_prev[0]
+        cpu = round(100 * (dt - di) / dt) if dt else 0
+    _cpu_prev = (idle, total)
+    mem = {l.split(":")[0]: int(l.split()[1]) for l in Path("/proc/meminfo").read_text().splitlines()[:5]}
+    used = mem["MemTotal"] - mem["MemAvailable"]
+    return {"cpu": cpu, "ram": round(100 * used / mem["MemTotal"]),
+            "ram_used": round(used / 1048576, 1), "ram_total": round(mem["MemTotal"] / 1048576, 1),
+            "cpu_temp": _hwmon_temp("coretemp"), "disk_temp": _hwmon_temp("nvme"),
+            "load": round(os.getloadavg()[0], 2)}
+
+
+def local_photos(c):
+    out = {}
+    max_size = int(c.get("slideshow", {}).get("max_size", 2400))
+    for folder in c.get("slideshow", {}).get("folders", []):
+        for p in sorted(Path(folder).expanduser().rglob("*")):
+            if p.suffix.lower() in IMG_EXT and p.is_file():
+                key = f"{p}|{p.stat().st_mtime_ns}|{max_size}".encode()
+                out[hashlib.sha1(key).hexdigest()[:20] + ".jpg"] = p
+    return out
+
+
+def encode_photo(path, max_size):
+    from PIL import Image, ImageOps
+    with Image.open(path) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        im.thumbnail((max_size, max_size))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=85, optimize=True)
+        return buf.getvalue()
+
+
+def sync_photos(c, verbose=False):
+    wanted = local_photos(c)
+    remote = set(req(c, "GET", "/photos").get("photos", []))
+    max_size = int(c.get("slideshow", {}).get("max_size", 2400))
+    missing = [n for n in wanted if n not in remote]
+    for i, name in enumerate(missing, 1):
+        try:
+            req(c, "PUT", f"/photos/{name}", encode_photo(wanted[name], max_size), "image/jpeg", timeout=60)
+            if verbose:
+                print(f"\r{i}/{len(missing)} photos sent", end="", flush=True)
+        except Exception as e:  # skip unreadable images
+            print(f"\n{wanted[name]}: {e}", file=sys.stderr)
+    for name in remote - wanted.keys():
+        req(c, "DELETE", f"/photos/{name}")
+    if verbose:
+        print(f"\nPhotos: {len(wanted)} on the PC, {len(missing)} sent, {len(remote - wanted.keys())} removed.")
+
+
+def run():
+    def goodbye(signum, frame):
+        # Service stopped or PC shutting down: tell the phone right away (photo frame without the 90 s wait).
+        try:
+            req(conf(), "POST", "/cmd", {"pc": "offline"}, timeout=3)
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, goodbye)
+    signal.signal(signal.SIGINT, goodbye)
+    photo_thread, last_photo = None, 0.0
+    last_sent, last_lock = 0.0, None
+    while True:
+        try:
+            locked = pc_locked()
+            if time.time() - last_sent >= 30 or locked != last_lock:
+                c = conf()
+                req(c, "POST", "/state", state_payload(c))
+                last_sent, last_lock = time.time(), locked
+                if time.time() - last_photo > 600 and not (photo_thread and photo_thread.is_alive()):
+                    last_photo = time.time()
+                    photo_thread = threading.Thread(target=lambda: _safe(sync_photos, c), daemon=True)
+                    photo_thread.start()
+        except (OSError, urllib.error.URLError, ValueError) as e:
+            print(f"phone unreachable: {e}", file=sys.stderr, flush=True)
+            last_sent = time.time()  # retry at the normal pace
+        time.sleep(3)
+
+
+def _safe(fn, *a):
+    try:
+        fn(*a)
+    except Exception as e:
+        print(f"photo sync: {e}", file=sys.stderr, flush=True)
+
+
+def pair():
+    """Reads the phone's API token over USB (adb) and stores it in ~/.config/phone-dash/token."""
+    attempts = [["adb", "shell", "cat", f"/sdcard/Android/data/{PKG}/files/token"],   # release builds
+                ["adb", "shell", "run-as", PKG, "cat", "files/token"]]                  # debug builds
+    tok, err = "", ""
+    for cmd in attempts:
+        out = subprocess.run(cmd, capture_output=True, text=True)
+        tok, err = out.stdout.strip(), out.stderr.strip()
+        if out.returncode == 0 and len(tok) >= 32:
+            break
+    else:
+        sys.exit(f"Could not read the token (is the app installed and opened once?): {err or tok}")
+    CONF_DIR.mkdir(parents=True, exist_ok=True)
+    TOKEN.write_text(tok + "\n")
+    TOKEN.chmod(0o600)
+    conf()
+    print(f"Token saved to {TOKEN}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__); return
+    cmd, args = argv[0], argv[1:]
+    if cmd == "run": return run()
+    if cmd == "pair": return pair()
+    c = conf()
+    if cmd == "brightness" and args:
+        v = None if args[0] == "auto" else int(args[0])
+        print(req(c, "POST", "/cmd", {"brightness": v if v is not None else "auto"}))
+    elif cmd == "screen" and args and args[0] in ("on", "off", "auto"):
+        print(req(c, "POST", "/cmd", {"screen": args[0]}))
+    elif cmd == "status":
+        print(json.dumps(req(c, "GET", "/status"), indent=2))
+    elif cmd == "sync-photos":
+        sync_photos(c, verbose=True)
+    elif cmd == "schedule":
+        s = c.get("screen", {})
+        print(json.dumps({"brightness": [[k, int(v)] for k, v in sorted(c.get("brightness", {}).items())],
+                          "night": s.get("night", []), "off": s.get("off", [])}))
+    elif cmd == "layout":
+        l = c.get("layout", {})
+        print(json.dumps({"tabs": l.get("tabs", ALL_TABS), "all": ALL_TABS,
+                          "show_billable": l.get("show_billable", True), "show_notes": l.get("show_notes", True)}))
+    elif cmd == "set-layout" and args:
+        d = json.loads(args[0])
+        tabs = [t for t in d.get("tabs", []) if t in ALL_TABS]
+        if not tabs:
+            sys.exit("At least one visible tab is required")
+        c["layout"] = {"tabs": list(dict.fromkeys(tabs)), "show_billable": bool(d.get("show_billable", True)),
+                       "show_notes": bool(d.get("show_notes", True))}
+        write_conf(c)
+        push(c)
+        print("ok")
+    elif cmd == "notes":
+        print(json.dumps(c.get("notes", {}).get("items", [])))
+    elif cmd == "set-notes" and args:
+        items = [str(x).strip()[:200] for x in json.loads(args[0]) if str(x).strip()][:6]
+        c.setdefault("notes", {})["items"] = items
+        write_conf(c)
+        push(c)
+        print("ok")
+    elif cmd == "options":
+        sc, pl = c.get("screen", {}), c.get("player", {})
+        print(json.dumps({"lyrics": pl.get("lyrics", True), "light": sc.get("light_sensor", True),
+                          "on_lock": sc.get("on_lock", "frame"),
+                          "slideshow": int(c.get("slideshow", {}).get("seconds", 20)),
+                          "language": c.get("language", "it")}))
+    elif cmd == "option" and args:
+        name, value = args[0], (args[1] if len(args) > 1 else None)
+        where = {"lyrics": ("player", "lyrics"), "light": ("screen", "light_sensor"), "on_lock": ("screen", "on_lock"),
+                 "slideshow": ("slideshow", "seconds"), "language": (None, "language")}
+        if name not in where:
+            sys.exit("Options: " + ", ".join(where))
+        sec, key = where[name]
+        if name == "language":
+            if value is not None:
+                if value not in ("it", "en"):
+                    sys.exit("language: it, en")
+                c["language"] = value
+                write_conf(c)
+                push(c)
+            print(c.get("language", "it"))
+            return
+        if value is not None:
+            if name == "slideshow":
+                if not value.isdigit() or not 3 <= int(value) <= 3600:
+                    sys.exit("slideshow: seconds between 3 and 3600")
+                c.setdefault(sec, {})[key] = int(value)
+            elif name == "on_lock":
+                if value not in ("frame", "off", "none"):
+                    sys.exit("on_lock: frame, off, none")
+                c.setdefault(sec, {})[key] = value
+            else:
+                c.setdefault(sec, {})[key] = value in ("on", "true", "1", "yes")
+            write_conf(c)
+            push(c)
+        v = c.get(sec, {}).get(key, {"on_lock": "frame", "slideshow": 20}.get(name, True))
+        print(v if isinstance(v, (str, int)) and not isinstance(v, bool) else ("on" if v else "off"))
+    elif cmd == "animation":
+        if args:
+            if args[0] not in ANIM_MODES:
+                sys.exit("Allowed values: " + ", ".join(ANIM_MODES))
+            c.setdefault("player", {})["animation"] = args[0]
+            write_conf(c)
+            try:
+                req(c, "POST", "/state", state_payload(c))
+            except Exception:
+                pass
+        print(c.get("player", {}).get("animation", "30s"))
+    elif cmd == "set-schedule" and args:
+        set_schedule(c, args[0])
+    elif cmd == "google-token" and args:
+        print(req(c, "POST", "/cmd", {"oauth_token": args[0]}, timeout=30))
+    else:
+        print(__doc__); sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

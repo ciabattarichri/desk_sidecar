@@ -1,0 +1,12 @@
+{
+    "id": "phoneDash",
+    "name": "Desk Sidecar",
+    "description": "Status and controls for the desk_sidecar phone dashboard (brightness, screen, slideshow, post-its, options) via phonedash.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "smartphone",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./PhoneDash.qml",
+    "requires_dms": ">=2.0.0"
+}

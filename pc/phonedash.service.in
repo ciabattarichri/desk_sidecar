@@ -1,0 +1,11 @@
+[Unit]
+Description=phonedash: heartbeat, theme, notifications and photos to the desk phone
+After=network-online.target
+
+[Service]
+ExecStart=@PHONEDASH@ run
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

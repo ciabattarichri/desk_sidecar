@@ -1,0 +1,99 @@
+# -*- coding: utf-8 -*-
+"""
+Samsung Galaxy A53 5G (SM-A536B) — reference model for case design. FreeCAD macro.
+
+Portrait, screen facing +Z, USB-C on the bottom edge (y = 0), origin at the bottom-left-back corner.
+Separate solids: Body (with the USB-C hole cut), Screen (active area, 0.2 mm proud of the front so
+it is easy to select/see), USB-C (the port volume, handy as a cutting tool), CameraBump.
+
+Body size is Samsung's spec; the screen comes from the 6.5" 20:9 diagonal; bezels, port, punch-hole
+and camera module positions are ESTIMATES — measure your phone and adjust the parameters.
+"""
+import math
+import os
+
+import FreeCAD as App
+import Part
+
+# ---- Body (spec) -------------------------------------------------------------------------
+W, L, T = 74.8, 159.6, 8.1          # width (X), length (Y), thickness (Z)
+CORNER_R = 9.0                       # plan-view corner radius (estimate)
+EDGE_R = 1.6                         # rounding of the front/back perimeter edges (estimate)
+
+# ---- Screen (active area from 6.5" 20:9) -------------------------------------------------
+DIAG = 6.5 * 25.4
+SCR_W = DIAG * 9 / math.hypot(9, 20)    # ≈ 67.8
+SCR_L = DIAG * 20 / math.hypot(9, 20)   # ≈ 150.6
+SCR_BOTTOM = 5.0                     # bottom bezel ("chin"), estimate; top = what's left
+SCR_R = 6.5                          # display corner radius, estimate
+PUNCH_D, PUNCH_FROM_TOP = 3.6, 3.3   # front camera hole (inside the display), estimate
+
+# ---- USB-C (bottom edge, centred) ---------------------------------------------------------
+USB_W, USB_H, USB_DEPTH = 8.9, 3.3, 7.0   # opening (stadium) and depth into the body
+
+# ---- Rear camera module (top-left seen from the back) -------------------------------------
+CAM_W, CAM_L, CAM_H = 22.0, 40.0, 1.6     # footprint and height above the back, estimate
+CAM_FROM_SIDE, CAM_FROM_TOP = 7.5, 7.5
+
+# Output next to this macro (falls back to the current directory when __file__ is unknown)
+OUT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+V = App.Vector
+
+
+def rounded_rect(w, l, r, z=0.0, x=0.0, y=0.0):
+    """Planar rounded-rectangle face."""
+    r = min(r, w / 2, l / 2)
+    pts = [V(x + r, y, z), V(x + w - r, y, z), V(x + w, y + r, z), V(x + w, y + l - r, z),
+           V(x + w - r, y + l, z), V(x + r, y + l, z), V(x, y + l - r, z), V(x, y + r, z)]
+    edges = [
+        Part.LineSegment(pts[0], pts[1]).toShape(),
+        Part.Arc(pts[1], V(x + w - r + r * math.cos(math.radians(-45)), y + r + r * math.sin(math.radians(-45)), z), pts[2]).toShape(),
+        Part.LineSegment(pts[2], pts[3]).toShape(),
+        Part.Arc(pts[3], V(x + w - r + r * math.cos(math.radians(45)), y + l - r + r * math.sin(math.radians(45)), z), pts[4]).toShape(),
+        Part.LineSegment(pts[4], pts[5]).toShape(),
+        Part.Arc(pts[5], V(x + r + r * math.cos(math.radians(135)), y + l - r + r * math.sin(math.radians(135)), z), pts[6]).toShape(),
+        Part.LineSegment(pts[6], pts[7]).toShape(),
+        Part.Arc(pts[7], V(x + r + r * math.cos(math.radians(225)), y + r + r * math.sin(math.radians(225)), z), pts[0]).toShape(),
+    ]
+    return Part.Face(Part.Wire(edges))
+
+
+# Body: rounded slab with softened front/back perimeter
+body = rounded_rect(W, L, CORNER_R).extrude(V(0, 0, T))
+try:
+    perimeter = [e for e in body.Edges
+                 if abs(e.BoundBox.ZMin - e.BoundBox.ZMax) < 1e-6 and (abs(e.BoundBox.ZMin) < 1e-6 or abs(e.BoundBox.ZMin - T) < 1e-6)]
+    body = body.makeFillet(EDGE_R, perimeter)
+except Exception as ex:  # keep a valid sharp body if the fillet fails
+    print("edge fillet skipped:", ex)
+
+# USB-C: stadium-shaped port centred on the bottom edge
+usb_r = USB_H / 2
+usb = Part.makeCylinder(usb_r, USB_DEPTH, V(W / 2 - USB_W / 2 + usb_r, -0.01, T / 2), V(0, 1, 0))
+usb = usb.fuse(Part.makeCylinder(usb_r, USB_DEPTH, V(W / 2 + USB_W / 2 - usb_r, -0.01, T / 2), V(0, 1, 0)))
+usb = usb.fuse(Part.makeBox(USB_W - USB_H, USB_DEPTH, USB_H, V(W / 2 - USB_W / 2 + usb_r, -0.01, T / 2 - usb_r)))
+usb = usb.removeSplitter()
+body = body.cut(usb)
+
+# Screen: active area on the front, with the punch-hole as a hole
+sx = (W - SCR_W) / 2
+screen = rounded_rect(SCR_W, SCR_L, SCR_R, z=T, x=sx, y=SCR_BOTTOM).extrude(V(0, 0, 0.2))
+punch = Part.makeCylinder(PUNCH_D / 2, 1, V(W / 2, SCR_BOTTOM + SCR_L - PUNCH_FROM_TOP - PUNCH_D / 2, T - 0.4))
+screen = screen.cut(punch)
+
+# Rear camera module (seen from the back it's top-left => from the front it's top-right, x high)
+cam = rounded_rect(CAM_W, CAM_L, 4.0, z=-CAM_H, x=W - CAM_FROM_SIDE - CAM_W, y=L - CAM_FROM_TOP - CAM_L).extrude(V(0, 0, CAM_H))
+
+doc = App.newDocument("GalaxyA53")
+for name, shape in (("Body", body), ("Screen", screen), ("USB_C", usb), ("CameraBump", cam)):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+doc.recompute()
+
+os.makedirs(OUT_DIR, exist_ok=True)
+doc.saveAs(os.path.join(OUT_DIR, "galaxy_a53.FCStd"))
+Part.export([doc.getObject(n) for n in ("Body", "Screen", "USB_C", "CameraBump")], os.path.join(OUT_DIR, "galaxy_a53.step"))
+import Mesh  # noqa: E402
+Mesh.Mesh(body.fuse([screen, cam]).tessellate(0.15)).write(os.path.join(OUT_DIR, "galaxy_a53.stl"))
+print("A53 model: body %.1f x %.1f x %.1f, screen %.1f x %.1f (bezel L/R %.1f, bottom %.1f, top %.1f), valid=%s"
+      % (W, L, T, SCR_W, SCR_L, sx, SCR_BOTTOM, L - SCR_BOTTOM - SCR_L, body.isValid() and screen.isValid()))
