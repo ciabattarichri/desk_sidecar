@@ -19,6 +19,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : ComponentActivity() {
+    private val lifecycleScopeCompat = kotlinx.coroutines.MainScope()
 
     private lateinit var nowPlaying: NowPlayingSource
     private lateinit var prefs: Prefs
@@ -37,6 +38,7 @@ class MainActivity : ComponentActivity() {
         server = HttpServer(this).also { it.start() }
         nowPlaying = NowPlayingSource(this)
 
+        if (intent?.getBooleanExtra("demo", false) == true) Demo.start(lifecycleScopeCompat)
         setContent {
             val permLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
@@ -84,6 +86,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.getBooleanExtra("demo", false)) Demo.start(lifecycleScopeCompat)
         // HOME pressed while already on the dashboard: close the drawer.
         drawerOpen.value = false
     }

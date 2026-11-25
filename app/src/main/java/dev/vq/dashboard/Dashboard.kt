@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -200,7 +201,15 @@ fun Dashboard(
         Box(Modifier.fillMaxSize().offset(shift.first.dp, shift.second.dp)) {
             Crossfade(targetState = night, label = "night") { isNight ->
                 if (isNight) NightView(now, visibleTrack?.takeIf { it.playing })
-                else DayView(now, weather, agenda, visibleTrack, track, nowPlaying, pcOnline, config.slideshowSeconds, prefs, billable, lastTouch)
+                else {
+                    // Layout demo overrides (see Demo.kt); null = real data.
+                    val demo = Demo.current.collectAsState().value
+                    val dTrack = when (demo?.music) { null -> track; "none" -> null; else -> Demo.track(demo.music == "playing") }
+                    val dVisible = when (demo?.music) { null -> visibleTrack; "playing" -> dTrack; else -> null }
+                    val dBillable = when (demo?.billable) { null, "real" -> billable; "huge" -> Demo.huge; else -> null }
+                    DayView(now, weather, agenda, dVisible, dTrack, nowPlaying, pcOnline, config.slideshowSeconds, prefs, dBillable, lastTouch)
+                    demo?.let { DemoLabel(it, Modifier.align(Alignment.TopCenter).padding(top = 4.dp)) }
+                }
             }
         }
     }
@@ -226,55 +235,44 @@ private fun DayView(
         Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        // Left: clock, date, weather
+        // Left: clock, short date and today's weather stacked, the hours card as tall as that stack beside
+        // them, then forecast (or the player while music plays) at the bottom.
         Column(Modifier.weight(1.05f).fillMaxHeight()) {
             val playing = track != null
+            var stackPx by remember { mutableIntStateOf(0) }
+            val stackDp = with(androidx.compose.ui.platform.LocalDensity.current) { stackPx.toDp() }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                Column {
+                Column(Modifier.onSizeChanged { stackPx = it.height }) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(now.format(HOUR_FMT), style = textStyle(104, p.onSurface, 800).copy(fontFamily = ClockFont, lineHeight = 104.sp()))
                         Text(":", style = textStyle(104, p.primary, 800).copy(fontFamily = ClockFont, lineHeight = 104.sp()))
                         Text(now.format(MIN_FMT), style = textStyle(104, p.primary, 800).copy(fontFamily = ClockFont, lineHeight = 104.sp()))
                     }
-                    // With music: short date + today's weather tuck under the clock, beside the hours card.
-                    if (playing) {
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Pill {
-                                MIcon(Sym.CALENDAR, 20.dp, p.primary)
-                                Text(now.format(SHORT_DATE_FMT).split(" ").joinToString(" ") { it.cap() }.replace(".", ""), style = textStyle(17, p.onSurface), maxLines = 1)
-                            }
-                            weather?.let { CurrentWeatherPill(it, compact = true) }
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Pill {
+                            MIcon(Sym.CALENDAR, 20.dp, p.primary)
+                            Text(now.format(SHORT_DATE_FMT).split(" ").joinToString(" ") { it.cap() }.replace(".", ""), style = textStyle(17, p.onSurface), maxLines = 1)
                         }
+                        if (playing) weather?.let { CurrentWeatherPill(it, compact = true) }
+                        else if (session != null) MiniControls(session, nowPlaying)
+                    }
+                    if (!playing) weather?.let {
+                        Spacer(Modifier.height(8.dp))
+                        CurrentWeatherPill(it, compact = false)
                     }
                 }
                 billable?.takeIf { Remote.config.value.showBillable }?.let {
                     Spacer(Modifier.width(16.dp))
-                    BillableCard(it, compact = false, modifier = Modifier.weight(1f))
+                    BillableCard(it, compact = false, modifier = Modifier.weight(1f).then(if (stackPx > 0) Modifier.height(stackDp) else Modifier))
                 }
             }
-            if (!playing) {
-                Spacer(Modifier.height(8.dp))
-                Pill {
-                    MIcon(Sym.CALENDAR, 20.dp, p.primary)
-                    Text(now.format(DATE_FMT).cap(), style = textStyle(17, p.onSurface), maxLines = 1)
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Spacer(Modifier.weight(1f))
-            Crossfade(targetState = track != null, label = "left-bottom") { playing ->
-                if (playing) {
-                    track?.let { MediaCard(it, nowPlaying, lastTouch) }
-                } else {
-                    weather?.let {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                CurrentWeatherPill(it, compact = false)
-                                if (session != null) MiniControls(session, nowPlaying)
-                            }
-                            ForecastPills(it)
-                        }
-                    }
+            Spacer(Modifier.height(12.dp))
+            // Bottom: the player while music plays, otherwise the next days fill the remaining height.
+            Crossfade(targetState = playing, modifier = Modifier.weight(1f).fillMaxWidth(), label = "left-bottom") { isPlaying ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
+                    if (isPlaying) track?.let { MediaCard(it, nowPlaying, lastTouch) }
+                    else weather?.let { ForecastTiles(it, Modifier.fillMaxSize()) }
                 }
             }
         }
@@ -321,7 +319,7 @@ private fun BillableCard(t: Billable.Totals, compact: Boolean, modifier: Modifie
             .clip(RoundedCornerShape(24.dp))
             .background(p.secondaryContainer)
             .padding(horizontal = 16.dp, vertical = if (compact) 6.dp else 10.dp),
-        verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 6.dp),
+        verticalArrangement = if (compact) Arrangement.spacedBy(2.dp) else Arrangement.SpaceEvenly,
     ) {
         @Composable
         fun block(label: String, icon: Char, filled: Boolean, sec: Long, amount: Double) {
@@ -330,8 +328,20 @@ private fun BillableCard(t: Billable.Totals, compact: Boolean, modifier: Modifie
                     MIcon(icon, 16.dp, p.primary, filled = filled)
                     Text(label, style = textStyle(13, fg, 600))
                 }
-                Text(Billable.hm(sec), style = if (compact) textStyle(24, p.primary, 600).copy(lineHeight = 26.sp()) else textStyle(30, p.primary, 600).copy(lineHeight = 32.sp()))
-                if (t.hasRates && !compact) Text(Billable.money(amount, t.currency), style = textStyle(14, fg, 500), maxLines = 1)
+                // Always one line: the text shrinks to fit the card (e.g. "128:45" or a 4-digit amount),
+                // otherwise it wraps and the taller card squeezes the date/weather column.
+                val max = if (compact) 24 else 30
+                androidx.compose.foundation.text.BasicText(
+                    Billable.hm(sec),
+                    style = textStyle(max, p.primary, 600).copy(lineHeight = (max + 2).sp()),
+                    maxLines = 1, softWrap = false,
+                    autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(minFontSize = 14.sp(), maxFontSize = max.sp(), stepSize = 1.sp()),
+                )
+                if (t.hasRates && !compact) androidx.compose.foundation.text.BasicText(
+                    Billable.money(amount, t.currency),
+                    style = textStyle(14, fg, 500), maxLines = 1, softWrap = false,
+                    autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(minFontSize = 9.sp(), maxFontSize = 14.sp(), stepSize = 1.sp()),
+                )
             }
         }
         block(if (t.running != null) tr("In corso", "Running") else tr("Oggi", "Today"), Sym.TIMER, t.running != null, t.todaySec, t.todayAmount)
@@ -357,6 +367,38 @@ private fun MiniControls(t: NowPlaying, source: NowPlayingSource) {
                     .clickable { action() },
                 contentAlignment = Alignment.Center,
             ) { MIcon(sym, 22.dp, if (main) p.onPrimaryContainer else p.onSurface, filled = true) }
+        }
+    }
+}
+
+/** Next three days as tall tiles: day, big icon, max/min, rain chance. */
+@Composable
+private fun ForecastTiles(w: Weather, modifier: Modifier) {
+    val p = LocalPalette.current
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        w.days.drop(1).take(3).forEach { d ->
+            val rain = d.rainProb ?: 0
+            val rainColor = if (rain >= 30) Color(0xFF6FA8DC) else p.onSurfaceVariant
+            Column(
+                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(24.dp)).background(p.surfaceContainer)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(d.date.format(DAY_FMT).cap().removeSuffix("."), style = textStyle(15, p.onSurfaceVariant, 600), modifier = Modifier.weight(1f))
+                    MIcon(Sym.UMBRELLA, 13.dp, rainColor)
+                    Spacer(Modifier.width(2.dp))
+                    Text("$rain%", style = textStyle(13, rainColor, 600))
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    MIcon(WeatherRepo.describe(d.code).first, 32.dp, p.primary)
+                    Spacer(Modifier.weight(1f))
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("${d.tMax.roundToInt()}°", style = textStyle(20, p.onSurface, 700))
+                        Text("${d.tMin.roundToInt()}°", style = textStyle(14, p.onSurfaceVariant, 500))
+                    }
+                }
+            }
         }
     }
 }
