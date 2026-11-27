@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ private val TAB_INFO = mapOf(
     "photos" to (Sym.PHOTO to "Foto|Photos"),
     "weather" to (Sym.SUNNY to "Meteo|Weather"),
     "pc" to (Sym.COMPUTER to "PC"),
+    "display" to (Sym.CAST to "Schermo|Screen"),
 )
 
 /** Tabs card. Follows the PC state (agenda / photos) but can always be swiped by hand. */
@@ -66,14 +68,20 @@ fun TabsCard(agenda: List<CalEvent>, weather: Weather?, pcOnline: Boolean?, slid
         }
     }
 
+    // `phonedash mirror tab`: jump to the Screen tab.
+    val showTab by Mirror.showTab.collectAsState()
+    LaunchedEffect(showTab) { if (showTab > 0) tabs.indexOf("display").takeIf { it >= 0 }?.let { pager.animateScrollToPage(it) } }
+    val fullMirror by Mirror.fullscreen.collectAsState()
+
     Column(
         modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(28.dp))
             .background(p.surfaceContainer)
     ) {
+        // Scrolls sideways if the tabs don't fit (7 tabs + the selected label is close to the card width).
         Row(
-            Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp),
+            Modifier.padding(top = 12.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             tabs.forEachIndexed { i, key ->
@@ -83,21 +91,26 @@ fun TabsCard(agenda: List<CalEvent>, weather: Weather?, pcOnline: Boolean?, slid
                 Pill(
                     Modifier.clickable { scope.launch { pager.animateScrollToPage(i) } },
                     background = if (selected) p.primaryContainer else p.surfaceContainerHigh,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = if (selected) 12.dp else 10.dp, vertical = 4.dp),
                 ) {
                     MIcon(icon, 18.dp, fg, filled = selected)
                     // Only the selected tab shows its label (M3 nav style), so they all fit.
-                    if (selected) Text(label.split("|").let { if (I18n.en) it.last() else it.first() }, style = textStyle(14, fg, 600))
+                    if (selected) Text(label.split("|").let { if (I18n.en) it.last() else it.first() }, style = textStyle(14, fg, 600), maxLines = 1, softWrap = false)
                 }
             }
         }
-        HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), key = { tabs.getOrElse(it) { "" } }) { page ->
+        // On the Screen tab swipes go to the PC, not to the pager (tabs still switch with the pills).
+        HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), key = { tabs.getOrElse(it) { "" } },
+            userScrollEnabled = tabs.getOrNull(pager.currentPage) != "display") { page ->
             when (tabs.getOrNull(page)) {
                 "agenda" -> AgendaPage(agenda, Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 12.dp))
                 "notifications" -> NotificationsPage(Modifier.fillMaxSize().padding(12.dp))
                 "home" -> HomePage(prefs, Modifier.fillMaxSize().padding(12.dp))
                 "weather" -> WeatherTab(weather, Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 12.dp))
                 "pc" -> PcPage(Modifier.fillMaxSize().padding(12.dp))
+                "display" -> if (fullMirror) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(tr("A schermo intero", "Full screen"), style = textStyle(15, p.onSurfaceVariant, 500))
+                } else MirrorView(Modifier.fillMaxSize().padding(12.dp), full = false)
                 "photos" -> Slideshow(
                     slideshowSec,
                     Modifier.fillMaxSize().padding(12.dp).clip(RoundedCornerShape(20.dp)),

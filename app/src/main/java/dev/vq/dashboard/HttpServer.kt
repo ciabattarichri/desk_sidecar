@@ -106,6 +106,11 @@ class HttpServer(private val context: Context, private val port: Int = PORT) {
                 if (j.has("screen")) {
                     Remote.setScreen(when (j.optString("screen")) { "on" -> true; "off" -> false; else -> null })
                 }
+                when (j.optString("mirror")) {
+                    "full" -> Mirror.fullscreen.value = true
+                    "tab" -> { Mirror.fullscreen.value = false; Mirror.showTab.value++ }
+                    "off" -> Mirror.fullscreen.value = false
+                }
                 j.optString("oauth_token").takeIf { it.isNotBlank() }?.let { GoogleHome.signIn(it) }
                 200 to Remote.status()
             }

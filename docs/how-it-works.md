@@ -130,6 +130,26 @@ generated on the phone at first start and copied to the PC with `phonedash pair`
 | `DELETE /photos/<name>` | — | remove a photo |
 
 Overrides (brightness, screen) last until the schedule slot they override changes.
+`POST /cmd` also takes `{"mirror": "full" | "tab" | "off"}` (PC screen full screen / Screen tab / back).
+
+### PC screen ("Screen" tab)
+
+A separate TCP connection on **127.0.0.1:8767** of the PC, reached by the phone through
+`adb reverse tcp:8767 tcp:8767` (kept up by `phonedash run` on every USB-connected phone): it works
+without Wi-Fi and nothing listens on the network. The phone opens it only while the Screen tab or the
+full-screen view is visible, and starts with a JSON line `{"token": "…"}` (its API token).
+
+* PC → phone: frames of 1-byte type + 4-byte big-endian length + payload — `1` = `{"w","h"}` JSON,
+  `2` = one H.264 access unit (Annex-B, SPS/PPS before each keyframe).
+* Phone → PC: JSON lines — `{"t":"d"|"m"|"u","i":id,"x":0..1,"y":0..1}` touches, `{"t":"key"}`
+  keyframe request.
+
+Per connection `phonedash` runs `phonedash _mirror-stream OUTPUT BITRATE FPS`: niri's
+`org.gnome.Mutter.ScreenCast` D-Bus API (`RecordMonitor`, cursor embedded) → PipeWire →
+GStreamer `glupload ! glcolorconvert ! gldownload` (DMA-BUF import) → `nvh264enc` (low latency,
+CBR, keyframe every 2 s, at most `fps` frames in) → stdout. Touches go to a uinput multitouch
+device; niri binds it to the output with `input { touch { map-to-output "OUTPUT" } }`. Settings in
+`[mirror]` of `config.toml` (output, port, bitrate, fps).
 
 ## External services
 
@@ -182,3 +202,5 @@ with music playing after these changes.
 * `config.toml` contains the Billable web-app secret: keep it 0600 and out of git (it lives in
   `~/.config`, not in this repository).
 * PC notifications and stats travel to the phone and are kept in memory only.
+* The PC screen stream binds to 127.0.0.1 only (reached through `adb reverse`, i.e. the USB cable)
+  and needs the same token; touches can only reach the mirrored output.

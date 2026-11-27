@@ -15,6 +15,7 @@
   phonedash notes / set-notes JSON      post-it notes (list of strings)
   phonedash option NAME [VALUE]         lyrics on|off, light on|off, on_lock frame|off|none, slideshow SECONDS, language it|en
   phonedash layout / set-layout JSON    {"tabs":[...], "show_billable":bool, "show_notes":bool}
+  phonedash mirror full|tab|off|toggle [OUTPUT]  "Screen" tab: a PC monitor (niri output) on the phone, full screen or in the tab
 Config: ~/.config/phone-dash/config.toml
 """
 import hashlib, io, json, os, re, signal, subprocess, sys, threading, time, tomllib, urllib.error, urllib.request
@@ -79,7 +80,7 @@ def conf():
 
 
 ANIM_MODES = ("off", "30s", "always")
-ALL_TABS = ["notifications", "agenda", "home", "photos", "weather", "pc"]
+ALL_TABS = ["notifications", "agenda", "home", "photos", "weather", "pc", "display"]
 HM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
@@ -120,6 +121,13 @@ def write_conf(c):
         "",
         "[notes]",
         f"items = {q(c.get('notes', {}).get('items', []))}",
+        "",
+        "# \"Screen\" tab: one niri output streamed to the phone over USB (adb), touches go back as a touchscreen",
+        "[mirror]",
+        f"output = {q(c.get('mirror', {}).get('output', 'DP-1'))}        # niri output name (niri msg outputs), e.g. a dummy plug",
+        f"port = {int(c.get('mirror', {}).get('port', 8767))}",
+        f"bitrate = {int(c.get('mirror', {}).get('bitrate', 8000))}         # kbit/s (H.264, NVENC)",
+        f"fps = {int(c.get('mirror', {}).get('fps', 30))}",
         "",
         "[layout]",
         f"tabs = {q(c.get('layout', {}).get('tabs', ALL_TABS))}   # order; remove an entry to hide that tab",
@@ -414,6 +422,243 @@ def pair_launcher():
         sys.exit("No connected phone has the launcher installed.")
 
 
+# ---- Mirror: one niri output on the phone ("display" tab) -------------------------------------------
+# niri implements the org.gnome.Mutter.ScreenCast D-Bus API: RecordMonitor(output) gives a PipeWire stream,
+# GStreamer imports its DMA-BUFs through GL and encodes H.264 with NVENC. The phone connects through
+# `adb reverse` (USB: no Wi-Fi needed, nothing listens on the network) and authenticates with its API token.
+# Frames to the phone: 1-byte type + 4-byte big-endian length + payload (1 = JSON size, 2 = H.264 access unit).
+# From the phone: JSON lines (touches with normalised coordinates, keyframe requests).
+
+def mirror_conf(c):
+    m = c.get("mirror", {})
+    return str(m.get("output", "DP-1")), int(m.get("port", 8767)), int(m.get("bitrate", 8000)), int(m.get("fps", 30))
+
+
+def mirror_stream(output, bitrate, fps):
+    """Child process: streams [output] as framed H.264 on stdout; "key" on stdin forces a keyframe; EOF stops."""
+    import struct
+    import gi
+    gi.require_version("Gst", "1.0")
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import Gio, GLib, Gst, GstVideo
+    Gst.init(None)
+    out = sys.stdout.buffer
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+
+    def call(path, iface, method, args, rtype):
+        return bus.call_sync("org.gnome.Mutter.ScreenCast", path, iface, method, args,
+                             GLib.VariantType(rtype) if rtype else None, 0, -1, None)
+
+    sess = call("/org/gnome/Mutter/ScreenCast", "org.gnome.Mutter.ScreenCast", "CreateSession",
+                GLib.Variant("(a{sv})", ({},)), "(o)").unpack()[0]
+    stream = call(sess, "org.gnome.Mutter.ScreenCast.Session", "RecordMonitor",
+                  GLib.Variant("(sa{sv})", (output, {"cursor-mode": GLib.Variant("u", 1)})), "(o)").unpack()[0]
+    loop = GLib.MainLoop()
+    st = {"pipe": None, "size": None}
+
+    def send(kind, payload):
+        out.write(struct.pack(">BI", kind, len(payload)) + payload)
+        out.flush()
+
+    def on_sample(sink):
+        sample = sink.emit("pull-sample")
+        s0 = sample.get_caps().get_structure(0)
+        size = (s0.get_value("width"), s0.get_value("height"))
+        if size != st["size"]:
+            st["size"] = size
+            send(1, json.dumps({"w": size[0], "h": size[1]}).encode())
+        buf = sample.get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if ok:
+            try:
+                send(2, bytes(info.data))
+            except (BrokenPipeError, OSError):
+                loop.quit()
+            finally:
+                buf.unmap(info)
+        return Gst.FlowReturn.OK
+
+    def on_added(_c, _s, _p, _i, _sig, params):
+        node = params.unpack()[0]
+        # keepalive-time: the last frame is repeated every second on a still screen (late joiners get a picture).
+        p = Gst.parse_launch(
+            f"pipewiresrc path={node} do-timestamp=true keepalive-time=1000 ! glupload ! glcolorconvert ! "
+            f"video/x-raw(memory:GLMemory),format=NV12 ! gldownload ! "
+            f"nvh264enc name=enc preset=low-latency-hq zerolatency=true gop-size={fps * 2} rc-mode=cbr bitrate={bitrate} "
+            f"repeat-sequence-header=true ! h264parse config-interval=-1 ! "
+            f"video/x-h264,stream-format=byte-stream,alignment=au,profile=high ! "
+            f"appsink name=sink emit-signals=true sync=false max-buffers=0 drop=false")
+        p.get_by_name("sink").connect("new-sample", on_sample)
+        # At most [fps] frames into the encoder (niri casts at the monitor's refresh, up to 180 Hz here).
+        gap, last = 1.0 / max(1, fps), [0.0]
+
+        def limit(_pad, _info):
+            now = time.monotonic()
+            if now - last[0] < gap * 0.9:
+                return Gst.PadProbeReturn.DROP
+            last[0] = now
+            return Gst.PadProbeReturn.OK
+        p.get_by_name("enc").get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limit)
+        pbus = p.get_bus()
+        pbus.add_signal_watch()
+        pbus.connect("message::error", lambda _b, m: (print(f"mirror: {m.parse_error()[0].message}", file=sys.stderr, flush=True), loop.quit()))
+        p.set_state(Gst.State.PLAYING)
+        st["pipe"] = p
+
+    def on_stdin(ch, _cond):
+        line = ch.readline()
+        if not line:
+            loop.quit(); return False
+        if line.strip() == "key":
+            # Before the pipeline exists the first frame is a keyframe anyway; afterwards ask the encoder.
+            if st["pipe"]:
+                st["pipe"].get_by_name("enc").get_static_pad("src").send_event(
+                    GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
+        return True
+
+    bus.signal_subscribe(None, "org.gnome.Mutter.ScreenCast.Stream", "PipeWireStreamAdded", stream, None, 0, on_added)
+    GLib.io_add_watch(GLib.IOChannel.unix_new(sys.stdin.fileno()), GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP, on_stdin)
+    call(sess, "org.gnome.Mutter.ScreenCast.Session", "Start", None, None)
+    try:
+        loop.run()
+    finally:
+        if st["pipe"]:
+            st["pipe"].set_state(Gst.State.NULL)
+        try:
+            call(sess, "org.gnome.Mutter.ScreenCast.Session", "Stop", None, None)
+        except Exception:
+            pass
+
+
+class Touchscreen:
+    """Virtual multitouch screen (uinput). niri maps it to the mirrored output with
+    input { touch { map-to-output "OUTPUT" } }; touches never move the mouse pointer."""
+    MAX = 32767
+
+    def __init__(self):
+        from evdev import UInput, AbsInfo, ecodes as e
+        self.e = e
+        ax = AbsInfo(0, 0, self.MAX, 0, 0, 100)
+        self.dev = UInput({e.EV_KEY: [e.BTN_TOUCH], e.EV_ABS: [
+            (e.ABS_X, ax), (e.ABS_Y, ax), (e.ABS_MT_SLOT, AbsInfo(0, 0, 9, 0, 0, 0)),
+            (e.ABS_MT_TRACKING_ID, AbsInfo(0, 0, 65535, 0, 0, 0)), (e.ABS_MT_POSITION_X, ax), (e.ABS_MT_POSITION_Y, ax)]},
+            name="phonedash touch", input_props=[e.INPUT_PROP_DIRECT])
+        self.slots, self.next_id = {}, 1
+
+    def event(self, kind, pid, x, y):
+        e, w = self.e, self.dev.write
+        if kind == "d" and pid not in self.slots:
+            free = next((s for s in range(10) if s not in self.slots.values()), None)
+            if free is None:
+                return
+            self.slots[pid] = free
+            w(e.EV_ABS, e.ABS_MT_SLOT, free)
+            w(e.EV_ABS, e.ABS_MT_TRACKING_ID, self.next_id)
+            self.next_id = self.next_id % 65000 + 1
+        slot = self.slots.get(pid)
+        if slot is None:
+            return
+        w(e.EV_ABS, e.ABS_MT_SLOT, slot)
+        if kind == "u":
+            w(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+            del self.slots[pid]
+        else:
+            px, py = int(min(max(x, 0.0), 1.0) * self.MAX), int(min(max(y, 0.0), 1.0) * self.MAX)
+            w(e.EV_ABS, e.ABS_MT_POSITION_X, px); w(e.EV_ABS, e.ABS_MT_POSITION_Y, py)
+            w(e.EV_ABS, e.ABS_X, px); w(e.EV_ABS, e.ABS_Y, py)
+        w(e.EV_KEY, e.BTN_TOUCH, 1 if self.slots else 0)
+        self.dev.syn()
+
+    def release_all(self):
+        for pid in list(self.slots):
+            self.event("u", pid, 0, 0)
+
+
+def serve_mirror():
+    """127.0.0.1:<port>, reached by the phone through `adb reverse`. One session at a time."""
+    import hmac, socket
+    _o, port, _b, _f = mirror_conf(conf())
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(2)
+    touch = [None]
+    current = [None]
+
+    def session(conn):
+        child = None
+        try:
+            conn.settimeout(5)
+            f = conn.makefile("rb")
+            hello = json.loads(f.readline() or b"{}")
+            if not hmac.compare_digest(str(hello.get("token", "")), token()):
+                return
+            conn.settimeout(None)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            output, _p, bitrate, fps = mirror_conf(conf())
+            child = subprocess.Popen([sys.executable, os.path.realpath(__file__), "_mirror-stream", output, str(bitrate), str(fps)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+            def pump():
+                try:
+                    while chunk := child.stdout.read1(65536):
+                        conn.sendall(chunk)
+                except OSError:
+                    pass
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            threading.Thread(target=pump, daemon=True).start()
+            if touch[0] is None:
+                try:
+                    touch[0] = Touchscreen()
+                except Exception as e:
+                    print(f"mirror: no touchscreen ({e})", file=sys.stderr, flush=True)
+            for line in f:
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if m.get("t") == "key":
+                    child.stdin.write(b"key\n"); child.stdin.flush()
+                elif touch[0] and m.get("t") in ("d", "m", "u"):
+                    touch[0].event(m["t"], int(m.get("i", 0)), float(m.get("x", 0)), float(m.get("y", 0)))
+        except (OSError, ValueError):
+            pass
+        finally:
+            if touch[0]:
+                touch[0].release_all()
+            if child:
+                child.kill(); child.wait()
+            conn.close()
+
+    while True:
+        conn, _a = srv.accept()
+        if current[0]:
+            try:
+                current[0].shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        current[0] = conn
+        threading.Thread(target=session, args=(conn,), daemon=True).start()
+
+
+def adb_reverse_loop():
+    """Keeps `adb reverse tcp:<port>` on every USB-connected phone (the dashboard reaches the PC through it)."""
+    while True:
+        try:
+            port = mirror_conf(conf())[1]
+            out = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10).stdout
+            for serial in [l.split()[0] for l in out.splitlines()[1:] if l.strip().endswith("device")]:
+                have = subprocess.run(["adb", "-s", serial, "reverse", "--list"], capture_output=True, text=True, timeout=10).stdout
+                if f"tcp:{port} tcp:{port}" not in have:
+                    subprocess.run(["adb", "-s", serial, "reverse", f"tcp:{port}", f"tcp:{port}"], capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(15)
+
+
 def run():
     def goodbye(signum, frame):
         # Service stopped or PC shutting down: tell the phone right away (photo frame without the 90 s wait).
@@ -424,6 +669,8 @@ def run():
         sys.exit(0)
 
     threading.Thread(target=lambda: _safe(serve_pull), daemon=True).start()
+    threading.Thread(target=lambda: _safe(serve_mirror), daemon=True).start()
+    threading.Thread(target=adb_reverse_loop, daemon=True).start()
     signal.signal(signal.SIGTERM, goodbye)
     signal.signal(signal.SIGINT, goodbye)
     photo_thread, last_photo = None, 0.0
@@ -449,7 +696,7 @@ def _safe(fn, *a):
     try:
         fn(*a)
     except Exception as e:
-        print(f"photo sync: {e}", file=sys.stderr, flush=True)
+        print(f"{getattr(fn, '__name__', 'task')}: {e}", file=sys.stderr, flush=True)
 
 
 def pair():
@@ -478,6 +725,7 @@ def main(argv):
     if cmd == "run": return run()
     if cmd == "pair": return pair()
     if cmd == "pair-launcher": return pair_launcher()
+    if cmd == "_mirror-stream": return mirror_stream(args[0], int(args[1]), int(args[2]))
     c = conf()
     if cmd == "brightness" and args:
         v = None if args[0] == "auto" else int(args[0])
@@ -564,6 +812,14 @@ def main(argv):
         print(c.get("player", {}).get("animation", "30s"))
     elif cmd == "set-schedule" and args:
         set_schedule(c, args[0])
+    elif cmd == "mirror" and args and args[0] in ("full", "tab", "off", "toggle"):
+        if len(args) > 1:
+            c.setdefault("mirror", {})["output"] = args[1]
+            write_conf(c)
+        mode = args[0]
+        if mode == "toggle":  # for a keybinding: full screen <-> back to the dashboard
+            mode = "off" if req(c, "GET", "/status").get("mirror") == "full" else "full"
+        print(req(c, "POST", "/cmd", {"mirror": mode}))
     elif cmd == "google-token" and args:
         print(req(c, "POST", "/cmd", {"oauth_token": args[0]}, timeout=30))
     else:

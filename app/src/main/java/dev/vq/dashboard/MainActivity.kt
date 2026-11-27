@@ -9,6 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +66,11 @@ class MainActivity : ComponentActivity() {
                     onLongPress = { drawerOpen.value = true },
                     setBrightness = ::setBrightness,
                 )
+                // PC screen full screen (button on the Screen tab or `phonedash mirror full`); BACK leaves it.
+                if (Mirror.fullscreen.collectAsState().value) {
+                    BackHandler { Mirror.fullscreen.value = false }
+                    MirrorView(androidx.compose.ui.Modifier.fillMaxSize(), full = true)
+                }
                 if (drawerOpen.value) {
                     AppDrawer(prefs = prefs, onClose = { drawerOpen.value = false })
                 }

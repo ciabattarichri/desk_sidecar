@@ -27,7 +27,7 @@ PluginComponent {
     property var notesList: []          // [{text}]
     property var layout: null           // {tabs:[...], all:[...], show_billable, show_notes}
     property var options: null          // {lyrics, light, on_lock}
-    readonly property var tabNames: ({ notifications: "Notifications", agenda: "Agenda", home: "Home", photos: "Photos", weather: "Weather", pc: "PC" })
+    readonly property var tabNames: ({ notifications: "Notifications", agenda: "Agenda", home: "Home", photos: "Photos", weather: "Weather", pc: "PC", display: "Screen" })
 
     function openSection(name) {
         root.showSchedule = name === "schedule" && !root.showSchedule;
@@ -429,6 +429,15 @@ PluginComponent {
                     }
                 }
 
+                DButton {
+                    // The PC monitor streamed to the phone ("Screen" tab), full screen on the phone or back.
+                    text: root.status && root.status.mirror === "full" ? "PC screen: exit full screen" : "PC screen full screen"
+                    iconName: root.status && root.status.mirror === "full" ? "fullscreen_exit" : "fullscreen"
+                    variant: "tonal"
+                    enabled: root.reachable
+                    onClicked: root.run(["mirror", "toggle"])
+                }
+
                 Row {
                     spacing: Theme.spacingS
                     DButton { text: "Post-it"; iconName: "sticky_note_2"; variant: root.showNotes ? "filled" : "tonal"; onClicked: root.openSection("notes") }
@@ -497,6 +506,10 @@ PluginComponent {
                     property var rows: root.layoutRows()
                     property bool billable: root.layout ? root.layout.show_billable : true
                     property bool notes: root.layout ? root.layout.show_notes : true
+                    // Saved on every change; delegates can't see `root`, so they go through here.
+                    function persist() { root.saveLayout(widgetsCol.rows, widgetsCol.billable, widgetsCol.notes); }
+                    // One call from the delegates: assigning rows destroys the calling delegate, nothing may run after it.
+                    function apply(r) { widgetsCol.rows = r; persist(); }
                     Connections {
                         target: root
                         function onLayoutChanged() { widgetsCol.rows = root.layoutRows(); }
@@ -513,10 +526,10 @@ PluginComponent {
                                 model: ["Visible", "Hidden"]
                                 currentIndex: modelData.on ? 0 : 1
                                 onSelectionChanged: (i, sel) => { if (sel) currentIndex = i;
-                                    if (!sel) return;
+                                    if (!sel || modelData.on === (i === 0)) return;
                                     const r = widgetsCol.rows.slice();
                                     r[index] = { key: modelData.key, on: i === 0 };
-                                    widgetsCol.rows = r;
+                                    widgetsCol.apply(r);
                                 }
                             }
                             StyledText {
@@ -531,7 +544,7 @@ PluginComponent {
                                 onClicked: {
                                     const r = widgetsCol.rows.slice();
                                     const x = r[index]; r[index] = r[index - 1]; r[index - 1] = x;
-                                    widgetsCol.rows = r;
+                                    widgetsCol.apply(r);
                                 }
                             }
                             DIconButton {
@@ -540,7 +553,7 @@ PluginComponent {
                                 onClicked: {
                                     const r = widgetsCol.rows.slice();
                                     const x = r[index]; r[index] = r[index + 1]; r[index + 1] = x;
-                                    widgetsCol.rows = r;
+                                    widgetsCol.apply(r);
                                 }
                             }
                         }
@@ -550,18 +563,17 @@ PluginComponent {
                         arrowKeysSelect: false
                         model: ["Show", "Hide"]
                         currentIndex: widgetsCol.billable ? 0 : 1
-                        onSelectionChanged: (i, sel) => { if (sel) currentIndex = i; if (sel) widgetsCol.billable = i === 0; }
+                        onSelectionChanged: (i, sel) => { if (sel) currentIndex = i; if (sel && widgetsCol.billable !== (i === 0)) { widgetsCol.billable = i === 0; widgetsCol.persist(); } }
                     }
                     SectionTitle { text: "Post-it" }
                     DButtonGroup {
                         arrowKeysSelect: false
                         model: ["Show", "Hide"]
                         currentIndex: widgetsCol.notes ? 0 : 1
-                        onSelectionChanged: (i, sel) => { if (sel) currentIndex = i; if (sel) widgetsCol.notes = i === 0; }
+                        onSelectionChanged: (i, sel) => { if (sel) currentIndex = i; if (sel && widgetsCol.notes !== (i === 0)) { widgetsCol.notes = i === 0; widgetsCol.persist(); } }
                     }
                     Row {
                         spacing: Theme.spacingM
-                        DButton { text: "Save"; iconName: "save"; onClicked: root.saveLayout(widgetsCol.rows, widgetsCol.billable, widgetsCol.notes) }
                         StyledText {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.saveMsg

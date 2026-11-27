@@ -68,6 +68,8 @@ data class RemoteConfig(
 
     companion object {
         val DEFAULT_TABS = listOf("notifications", "agenda", "home", "photos", "weather", "pc")
+        /** Every known tab ("display" = PC screen, off unless chosen in the layout). */
+        val ALL_TABS = DEFAULT_TABS + "display"
 
         fun fromJson(j: JSONObject): RemoteConfig {
             val d = RemoteConfig()
@@ -88,7 +90,7 @@ data class RemoteConfig(
                 lyrics = j.optBoolean("lyrics", true),
                 lightSensor = j.optBoolean("light_sensor", true),
                 onLock = j.optString("on_lock", "frame"),
-                tabs = j.optJSONArray("tabs")?.let { a -> (0 until a.length()).map { a.getString(it) }.filter { it in DEFAULT_TABS } }
+                tabs = j.optJSONArray("tabs")?.let { a -> (0 until a.length()).map { a.getString(it) }.filter { it in ALL_TABS } }
                     ?.takeIf { it.isNotEmpty() } ?: DEFAULT_TABS,
                 showBillable = j.optBoolean("show_billable", true),
                 showNotes = j.optBoolean("show_notes", true),
@@ -234,6 +236,7 @@ object Remote {
         .put("screen_override", screenOverride.value?.value ?: JSONObject.NULL)
         .put("photos", PhotoStore.names(app).size)
         .put("google_home", GoogleHome.ui.value.signedIn)
+        .put("mirror", if (Mirror.fullscreen.value) "full" else "off")
         .put("pc_online", pcOnline() ?: JSONObject.NULL)
         .put("heartbeat_age_s", if (lastHeartbeat.value == 0L) -1 else (SystemClock.elapsedRealtime() - lastHeartbeat.value) / 1000)
 

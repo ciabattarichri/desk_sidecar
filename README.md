@@ -20,6 +20,10 @@ Built for a Samsung Galaxy A53 5G on stock One UI (debloated) and a Fedora PC wi
 * **Tabs** — Notifications (from the PC), Agenda, Home (Google Home devices), Photos, Weather
   (3-hour table: temperature, rain, humidity), PC (CPU, RAM, temperatures). Reorder and hide them
   from the bar plugin.
+* **PC screen** — an optional "Screen" tab shows one PC monitor (a niri output, e.g. a dummy plug
+  used as a third monitor) over the USB cable: hardware H.264 (NVENC) to hardware decoding, touches
+  sent back as a virtual touchscreen that never moves the mouse; full screen from the tab, the bar
+  plugin or `phonedash mirror toggle`.
 * **Photo frame** — when the PC is off or locked (or on demand): full-screen Ken Burns slideshow
   of a PC folder, clock and weather, synced lyrics, now playing.
 * **Post-its** written from the PC, stuck on the dashboard.
